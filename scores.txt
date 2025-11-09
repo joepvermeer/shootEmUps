@@ -6,3 +6,5 @@ joep,58
 naamtest,5
 anon,59
 testtf,75
+Joeptest,35
+Job,120

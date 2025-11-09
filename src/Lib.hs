@@ -9,7 +9,6 @@ module Lib
 import qualified Graphics.Gloss as G
 import Graphics.Gloss.Interface.IO.Game ( Event(..), Key(..), SpecialKey(..), KeyState(..) )
 import System.Exit (exitSuccess)
-import System.Random (StdGen, randomR, split)
 import Data.List (partition, foldl', sortOn)
 import System.Random (StdGen, randomR, split)
 import System.Directory (doesFileExist)
@@ -28,20 +27,25 @@ explosionTTL, explosionRadius :: Float
 explosionTTL   = 0.4
 explosionRadius = 18
 
+--constants for player speed and radius
 playerRadius, playerSpeed :: Float
 playerRadius = 10
 playerSpeed  = 300
 
+-- constants for bullets
 bulletSpeed, bulletRadius, fireCooldown :: Float
 bulletSpeed  = 600
 bulletRadius = 4
 fireCooldown = 0.4
 
+--enemy radius constant. let op: sommige dingen zijn relatief hieraan dus niet snel veranderen 
 enemyRadius      :: Float; enemyRadius      = 12
+
+--chaser constants
 spawnMarginX     :: Float; spawnMarginX     = 20  -- begin buiten beeld met spawns
 chaserSpeedX     :: Float; chaserSpeedX     = 180 
 chaserSpeedY     :: Float; chaserSpeedY     = 160 
-chaserHP         :: Int;   chaserHP         = 3
+chaserHP         :: Int;   chaserHP         = 2
 
 -- schade 
 bulletDamage   :: Int;   bulletDamage   = 1
@@ -82,6 +86,13 @@ speederAimGain       :: Float; speederAimGain       = 6.0   -- hoe agressief Y n
 speederDashDuration  :: Float; speederDashDuration  = 0.35
 speederDashCooldown  :: Float; speederDashCooldown  = 1.8
 
+--power ups 
+powerupSize      :: Float; powerupSize      = 18
+powerupSpeedX    :: Float; powerupSpeedX    = 90      -- drijven langzaam mee naar links
+powerupSpawnMin  :: Float; powerupSpawnMin  = 8       -- tussen 8 en 14 s
+powerupSpawnMax  :: Float; powerupSpawnMax  = 14
+rapidFireDuration:: Float; rapidFireDuration= 6       -- seconden 2x sneller schieten
+
 --classes
 class Renderable a where
   render :: a -> G.Picture
@@ -118,8 +129,10 @@ data Bullet = Bullet
   } deriving (Show)
 
 data EnemyBullet = EnemyBullet
-  { ebx :: Float, eby :: Float
-  , ebvx :: Float, ebvy :: Float
+  { ebx :: Float
+  , eby :: Float
+  , ebvx :: Float
+  , ebvy :: Float
   , ebr  :: Float
   } deriving (Show)
 
@@ -138,9 +151,12 @@ data World = World
   , enemyBullets :: [EnemyBullet]
   , playerName  :: String        -- kan leeg zijn 
   , highscores  :: [(String,Int)]
+  , powerups       :: [Powerup]
+  , powerupTimer   :: Float        -- tijd tot volgende spawn 
+  , rapidFireTimer :: Float        
   } deriving (Show)
 
---enemies (voor nu alleen chaser) 
+--enemies 
 data EnemyKind = Chaser | Zigzag | Turret | Tank | Speeder
   deriving (Eq, Show)
 
@@ -159,6 +175,16 @@ data Explosion = Explosion
   { exx  :: Float
   , exy  :: Float
   , ettl :: Float
+  } deriving (Show)
+
+--data types for powerups 
+data PowerupKind = PUExtraLife | PURapidFire
+  deriving (Eq, Show)
+
+data Powerup = Powerup
+  { pux :: Float
+  , puy :: Float
+  , puk :: PowerupKind
   } deriving (Show)
 
 --instances for domain types
@@ -223,6 +249,22 @@ instance Renderable EnemyBullet where
 instance Updatable EnemyBullet where
   update dt b = b { ebx = ebx b + ebvx b * dt
                   , eby = eby b + ebvy b * dt }
+
+--instance for power ups 
+instance Renderable Powerup where
+  render p =
+    let sz  = powerupSize
+        col = case puk p of
+                PUExtraLife -> G.makeColorI 255 0 0 255    
+                PURapidFire -> G.makeColorI 0 160 255 255   
+    in G.translate (pux p) (puy p)
+       $ G.color col
+       $ G.rectangleSolid sz sz
+
+instance Updatable Powerup where
+  update dt p = p { pux = pux p - powerupSpeedX * dt }
+
+
 -- Initialisatie van de wereld op begin spel 
 
 initialWorld :: StdGen -> World
@@ -253,6 +295,9 @@ initialWorld g =
       , enemyBullets = []
       , playerName = ""
       , highscores = []
+      , powerups       = []
+      , powerupTimer   = 10             
+      , rapidFireTimer = 0
       }
 
 -- helper voor herstarten 
@@ -280,11 +325,12 @@ drawWorldIO w = pure $ G.pictures
   , G.pictures (map render (explosions w))
   , G.pictures (map render (enemyBullets w))
   , scoreboard w
+  , G.pictures (map render (powerups w)) 
   ]
 
 
 scoresFile :: FilePath
-scoresFile = "scores.txt"   -- in werkdirectory van je app
+scoresFile = "scores.txt"   -- file om scores bij te houden. wordt automatisch aangemaakt nu 
 
 appendScoreIO :: String -> Int -> IO ()
 appendScoreIO name sc = appendFile scoresFile (name <> "," <> show sc <> "\n")
@@ -305,6 +351,7 @@ readScoresIO = do
   where
     mapMaybe f = foldr (\a acc -> maybe acc (:acc) (f a)) []
 
+--beste scores sorteren en top 3 uitrekenen 
 top3 :: [(String,Int)] -> [(String,Int)]
 top3 = take 3 . sortOn (Ord.Down . snd)
 
@@ -332,7 +379,7 @@ handleInputIO ev w = case ev of
     pure w { phase = StartReady }
 
   EventKey (Char c) Down _ _ | phase w == StartName ->
-    -- alleen ASCII en max lengte van 20, anders te lang voor score board 
+    -- alleen ASCII letters die je kan zien en max lengte van 20, anders te lang voor score board 
     let ok = c >= ' ' && c <= '~'
         s  = playerName w
     in pure $ if ok && length s < 20
@@ -379,7 +426,7 @@ handleInputIO ev w = case ev of
 moveSpeed :: World -> Float
 moveSpeed w = speed w
 
---hulp functies voor bewegen
+--hulp functies voor bewegen 
 setVX :: Float -> World -> World
 setVX v world = world { player = (player world) { vx = v } }
 
@@ -414,7 +461,7 @@ releaseDown :: World -> World
 releaseDown  w =
   let p = player w in if vy p < 0 then setVY 0 w else w
 
---hulp functies bewegen lopen tm hier
+--hulp functies bewegen, lopen tm hier
 
 --hulpfinctie voor schieten
 fireBullet :: World -> World
@@ -507,6 +554,61 @@ spawnSpeederAt y =
     , eaux  = 0    -- start: mag dashen
     }
 
+-- helper voor spawn powerups
+spawnPowerupAt :: PowerupKind -> Float -> Powerup
+spawnPowerupAt k y =
+  Powerup { pux =  fieldW0/2 + powerupSize + spawnMarginX
+          , puy =  clampY y
+          , puk =  k
+          }
+  where
+    -- gebruik vaste window grootte
+    fieldW0 = winW
+    fieldH0 = winH
+    clampY yy = max (-fieldH0/2 + powerupSize) (min (fieldH0/2 - powerupSize) yy)
+
+--volgende spawntijd random en random y locatie voor spawn 
+nextPowerupSpawn :: StdGen -> (Float, Float, StdGen)
+nextPowerupSpawn g0 =
+  let (t, g1) = randomR (powerupSpawnMin, powerupSpawnMax) g0
+      (y, g2) = randomR (-winH/2 + powerupSize, winH/2 - powerupSize) g1
+  in (t, y, g2)
+
+-- kies powerupsoort met kans 50/50
+pickPowerup :: StdGen -> (PowerupKind, StdGen)
+pickPowerup g =
+  let (i, g') = randomR (0 :: Int, 1) g
+  in (if i == 0 then PUExtraLife else PURapidFire, g')
+
+-- pakken powerup op als circkel ipv vierkant. voor gameplay werkt het nagenoeg het zelfde 
+powerupCircle :: Powerup -> (Float,Float,Float)
+powerupCircle p = (pux p, puy p, powerupSize * 0.8)
+
+resolvePowerups :: Player -> [Powerup]
+                -> (Player, [Powerup], Bool, Maybe PowerupKind)
+resolvePowerups p ps =
+  case break (\pu -> circleHit (playerCircle p) (powerupCircle pu)) ps of
+    (left, pu:right) ->
+      -- gepakt: verwijder pu, pas player toe
+      let (p', effectApplied) = applyPowerup p pu
+      in (p', left ++ right, True, Just (puk pu))
+    _ -> (p, ps, False, Nothing)
+
+
+applyPowerup :: Player -> Powerup -> (Player, ())
+applyPowerup p pu =
+  case puk pu of
+    PUExtraLife ->
+      ( p { php = min playerMaxHP (php p + 1) }, () )
+    PURapidFire ->
+      -- timer wordt op world gezet; player zelf hoeft niet te veranderen
+      ( p, () )
+
+--huidige fire cooldown, halveer rapidfire (dan is firerate weer normaal)
+currentFireCooldown :: World -> Float
+currentFireCooldown w =
+  if rapidFireTimer w > 0 then fireCooldown / 2 else fireCooldown
+
 --handel schieten en botsingen met enemies 
 circleHit :: (Float,Float,Float) -> (Float,Float,Float) -> Bool
 circleHit (x1,y1,r1) (x2,y2,r2) =
@@ -531,7 +633,7 @@ scoreFor e = case ekind e of
   Turret  -> 3   
   Speeder -> 2           
 
---spawn nieuewe enemy na tijd. --> moet vervangen worden door enemies uit files te halen 
+--spawn nieuewe enemy na tijd 
 nextSpawn :: StdGen -> (Float, Float, StdGen)
 nextSpawn g0 =
   let (t, g1) = randomR (spawnMin, spawnMax) g0
@@ -607,7 +709,7 @@ updateSpeeder dt playerY e
                   }
            else if t > -speederDashDuration
              then
-               -- DASH ACTIEF: scherpe hoek naar speler
+               -- dash actief naar speler 
                let dy   = playerY - ey e
                    vy0  = evy e
                    vy1  = vy0 + speederAimGain * dy
@@ -619,7 +721,7 @@ updateSpeeder dt playerY e
                     , eaux = t
                     }
            else
-             -- dash voorbij: DIRECT naar horizontaal
+             -- na dash direct weer horizontaal bewegen 
              e { eaux = speederDashCooldown
                , ex   = ex e + evx e * dt
                , ey   = ey e                  -- geen extra verticale verplaatsing
@@ -729,7 +831,7 @@ stepWorldIO dt w =
     GameOver   -> pure w
     Running    ->
       let
-        -- speler updaten + cooldown omlaag
+        -- speler updaten en cooldown omlaag
         p1 = update dt (player w)
         p2 = p1 { cooldown = max 0 (cooldown p1 - dt) }
 
@@ -743,10 +845,10 @@ stepWorldIO dt w =
         -- auto-fire: als firing aan staat en cooldown vrij is
         (p4, fired) =
           if firing p3 && cooldown p3 <= 0
-            then ( p3 { cooldown = fireCooldown }, [mkBulletFrom p3] )
+            then ( p3 { cooldown = currentFireCooldown w }, [mkBulletFrom p3] )
             else ( p3, [] )
 
-        -- bullets updaten + buiten beeld weggooien
+        -- bullets updaten en buiten beeld weggooien
         bs'  = map (update dt) (bullets w ++ fired)
         outL = -fieldW w / 2
         outR =  fieldW w / 2
@@ -756,24 +858,34 @@ stepWorldIO dt w =
                       in x >= outL && x <= outR && y >= outB && y <= outT
         bs'' = filter inBoundsB bs'
 
-        -- spawn timer aftellen
-        t1 = spawnTimer w - dt
+        -- powerups aftellen timers en evt spawn 
+        puT1 = powerupTimer w - dt
+        (wPUSpawned, puNext) =
+          if puT1 <= 0
+            then
+              let (k, g1)      = pickPowerup (rng w)
+                  (tNew, yPU, g2) = nextPowerupSpawn g1
+                  puNew          = spawnPowerupAt k yPU
+              in ( w { powerups = puNew : powerups w, rng = g2 }, tNew )
+            else (w, puT1)
 
-        -- eventueel spawnen (Chaser / Zigzag / Tank / Turret / Speeder) en timer resetten
+        -- spawn enemy timer
+        t1 = spawnTimer wPUSpawned - dt
+
+        -- eventueel spawnen enemy kinds en timer resetten
         (wSpawned0, tNext) =
           if t1 <= 0
             then
-              let (tNew, ySpawn, g1) = nextSpawn (rng w)
-                  -- 0=Chaser, 1=Zigzag, 2=Tank, 3=Turret, 4=Speeder
-                  (pick, g2)         = randomR (0 :: Int, 4) g1
+              let (tNew, ySpawn, g1) = nextSpawn (rng wPUSpawned)
+                  (pick, g2)         = randomR (0 :: Int, 4) g1 --spawnt een random enemy aan de hand van nummer dat wordt gekozen 
                   eNew = case pick of
                            0 -> spawnChaserAt ySpawn
                            1 -> spawnZigzagAt ySpawn
                            2 -> spawnTankAt   ySpawn
                            3 -> spawnTurretAt ySpawn
                            _ -> spawnSpeederAt ySpawn
-              in ( w { enemies = eNew : enemies w, rng = g2 }, tNew )
-            else (w, t1)
+              in ( wPUSpawned { enemies = eNew : enemies wPUSpawned, rng = g2 }, tNew )
+            else (wPUSpawned, t1)
 
         -- enemies updaten (per type)
         pyPlayer = py p4
@@ -789,17 +901,24 @@ stepWorldIO dt w =
         leftBound = -fieldW w / 2 - enemyRadius - spawnMarginX
         es'' = filter (\e -> ex e > leftBound) esDashed
 
-        -- === Collisions ===
+        -- powerupos updaten en buiten beeld verwijderen 
+        pus'  = map (update dt) (powerups wSpawned0)
+        leftCullPU = -fieldW w / 2 - powerupSize - spawnMarginX
+        inBoundsPU p = let x = pux p; y = puy p
+               in x >= leftCullPU && y >= outB && y <= outT
+        pus'' = filter inBoundsPU pus'
 
-        -- bullets vs enemies (met explosies bij death)
+        -- collisions afhandelen
+
+        -- bullets vs enemies en explosie bij death 
         (bsAfter, esAfterBullets, gained, boomFromPBullets) =
           resolveBulletEnemy es'' bs''
 
-        -- enemy bodies vs player: consume één enemy bij hit -> enemy weg + explosion
+        -- enemy bodies vs player 
         (p5, esAfterBodies, boomFromBodies, _tookEnemy) =
           resolveEnemyPlayerConsume esAfterBullets p4
 
-        -- enemy bullets updaten + cullen (van turrets)
+        -- enemy bullets updaten en cullen (van turrets)
         ebs'  = map (update dt) (enemyBullets w ++ newEBullets)
         inBoundsEB b = let x = ebx b; y = eby b
                        in x >= outL && x <= outR && y >= outB && y <= outT
@@ -809,30 +928,43 @@ stepWorldIO dt w =
         (p6, ebsAfter, boomFromEB, _tookEB) =
           resolveEnemyBulletsPlayer ebs'' p5
 
+        -- powerup opgepakt
+        (p7, pusAfter, picked, whichPU) = resolvePowerups p6 pus''
+
+        -- rapid fire timer updaten 
+        rf' = max 0 (rapidFireTimer w - dt)
+        rf'' = case whichPU of
+                 Just PURapidFire -> max rf' rapidFireDuration
+                 _                -> rf'
+        -- extra life is al in player toegepast
+
         -- i-frames tikken omlaag
-        p7       = p6 { ifr = max 0 (ifr p6 - dt) }
+        p8       = p7 { ifr = max 0 (ifr p7 - dt) }
         newScore = score w + gained
 
-        -- explosions updaten + toevoegen
+        -- explosions updaten en toevoegen
         exps'  = explosions w ++ boomFromPBullets ++ boomFromBodies ++ boomFromEB
         exps'' = updateExplosions dt exps'
 
         -- game over check
-        phase' = if php p7 <= 0 then GameOver else Running
+        phase' = if php p8 <= 0 then GameOver else Running
 
         -- pure wereld na deze tick
         wOutPure = wSpawned0
-          { player       = p7
-          , bullets      = bsAfter
-          , enemyBullets = ebsAfter
-          , enemies      = esAfterBodies
-          , spawnTimer   = tNext
-          , explosions   = exps''
-          , score        = newScore
-          , phase        = phase'
+          { player         = p8
+          , bullets        = bsAfter
+          , enemyBullets   = ebsAfter
+          , enemies        = esAfterBodies
+          , powerups       = pusAfter
+          , powerupTimer   = puNext
+          , rapidFireTimer = rf''
+          , spawnTimer     = tNext
+          , explosions     = exps''
+          , score          = newScore
+          , phase          = phase'
           }
       in do
-        -- Als we net doodgingen (Running -> GameOver): score opslaan + top3 verversen
+        -- Als we net doodgingen score opslaan en top 3 bijwerken 
         if phase w == Running && phase' == GameOver
           then do
             let nm = if null (playerName w) then "anon" else playerName w
@@ -843,6 +975,7 @@ stepWorldIO dt w =
             pure wOutPure
 
 
+
 -- simpele HUD, kan nog wel veranderen 
 hud :: World -> G.Picture
 hud w = G.pictures
@@ -850,6 +983,9 @@ hud w = G.pictures
       $ G.scale 0.12 0.12
       $ G.color G.white
       $ G.text ("HP:" <> show (php (player w)) <> "  SCORE:" <> show (score w))
+      , if rapidFireTimer w > 0
+      then G.translate 0 (-40) $ G.scale 0.1 0.1 $ G.color G.cyan $ G.text "RAPID"
+      else G.blank
   ]
 
 -- UI overlay voor start, pauze en game over
@@ -889,7 +1025,7 @@ uiOverlay w = case phase w of
           ]
 
 
---score board van top 3 laten zien rechts boven in wundow 
+--score board van top 3 laten zien rechts boven in window 
 scoreboard :: World -> G.Picture
 scoreboard w =
   let items = zip [1..] (top3 (highscores w))
